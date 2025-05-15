@@ -1,177 +1,177 @@
+# app.py
+
 import streamlit as st
-from dotenv import load_dotenv
+from streamlit_chat import message
 import os
-import fitz  # PyMuPDF
 import requests
-import re
+import fitz  # PyMuPDF
+import time
+from dotenv import load_dotenv
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-st.set_page_config(page_title="TalentScout AI", page_icon="🧠")
-st.title("🧠 TalentScout AI - Resume Interview Assistant")
+st.set_page_config(page_title="TalentScout AI - Hiring Assistant", page_icon="🧠")
 
-# ----- SESSION STATE -----
-if "stage" not in st.session_state:
-    st.session_state.stage = "upload"
-if "resume_text" not in st.session_state:
-    st.session_state.resume_text = ""
-if "skills" not in st.session_state:
-    st.session_state.skills = ""
-if "questions" not in st.session_state:
-    st.session_state.questions = []
-if "answers" not in st.session_state:
-    st.session_state.answers = []
-if "current_question" not in st.session_state:
-    st.session_state.current_question = 0
-if "feedback" not in st.session_state:
-    st.session_state.feedback = ""
+st.markdown("## 🧠 TalentScout AI: Resume-Based Interviewer")
+st.caption("Upload your resume. Get skill-based questions, personalized feedback, and preparation topics.")
 
-# ----- UTILS -----
-def call_groq(prompt):
+# ----------------------------
+# Helper Functions
+# ----------------------------
+
+def extract_text_from_pdf(pdf_file):
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    text = ""
+    for page in doc:
+        text += page.get_text()
+    return text
+
+def ask_groq(prompt):
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
-    data = {
+    payload = {
         "model": "llama3-8b-8192",
         "messages": [{"role": "user", "content": prompt}]
     }
-    res = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data)
-    return res.json()["choices"][0]["message"]["content"]
+    res = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
+    res.raise_for_status()
+    return res.json()["choices"][0]["message"]["content"].strip()
 
-def extract_text_from_pdf(uploaded_file):
-    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
-    return "".join(page.get_text() for page in doc)
+def extract_skills(resume_text):
+    prompt = f"Extract the key technical skills from the following resume text:\n\n{resume_text}\n\nReturn them as a comma-separated list only."
+    skills = ask_groq(prompt)
+    return [s.strip() for s in skills.split(",") if s.strip()]
 
-def parse_questions(raw_text):
-    question_blocks = raw_text.strip().split("\n\n")
-    questions = []
-    for block in question_blocks:
-        question = {"question": "", "options": [], "correct": "", "type": "long"}
-        lines = block.strip().split("\n")
-        for line in lines:
-            if line.startswith("Q:"):
-                question["question"] = line[2:].strip()
-            elif line.startswith("Options:"):
-                opts = re.findall(r'[A-D]\. [^,]+', line)
-                question["options"] = opts
-                question["type"] = "mcq"
-            elif line.startswith("Correct:"):
-                corr = line.split(":")[1].strip()
-                if "," in corr:
-                    question["correct"] = [c.strip() for c in corr.split(",")]
-                    question["type"] = "msq"
-                else:
-                    question["correct"] = corr.strip()
-                    if question["type"] != "msq":
-                        question["type"] = "mcq"
-        questions.append(question)
-    return questions
+def generate_questions(skills):
+    skill_list = ', '.join(skills)
+    prompt = f"""
+You are an expert technical interviewer. Based on these skills: {skill_list}, generate 5 questions:
+- 2 [MCQ]
+- 2 [MSQ]
+- 1 [LONG]
 
-# ----- APP STAGES -----
+Format strictly as:
+[MCQ]
+Q: ...
+Options:
+A. ...
+B. ...
+C. ...
+D. ...
+Correct: ...
 
-# 1. Upload resume
-if st.session_state.stage == "upload":
-    uploaded = st.file_uploader("📄 Upload your resume (PDF)", type="pdf")
+[MSQ]
+Q: ...
+Options:
+A. ...
+B. ...
+C. ...
+D. ...
+Correct: ..., ...
+
+[LONG]
+Q: ...
+"""
+    return ask_groq(prompt)
+
+def evaluate_long_answer(question, user_answer):
+    prompt = f"""
+Evaluate the following answer to this question:
+
+Question: {question}
+Answer: {user_answer}
+
+Score it from 0 to 5.
+Then provide a 2-3 sentence feedback and suggest improvements.
+
+Format:
+Score: ...
+Feedback: ...
+Suggestions: ...
+"""
+    return ask_groq(prompt)
+
+def generate_prep_topics(skills):
+    prompt = f"List 15 important technical topics or questions a candidate should prepare for based on these skills: {', '.join(skills)}. Use bullet points."
+    return ask_groq(prompt)
+
+# ----------------------------
+# Session State
+# ----------------------------
+
+if "resume_text" not in st.session_state:
+    st.session_state.resume_text = None
+if "skills" not in st.session_state:
+    st.session_state.skills = None
+if "questions" not in st.session_state:
+    st.session_state.questions = []
+if "answers" not in st.session_state:
+    st.session_state.answers = []
+if "step" not in st.session_state:
+    st.session_state.step = "upload"
+if "feedback" not in st.session_state:
+    st.session_state.feedback = ""
+if "topics" not in st.session_state:
+    st.session_state.topics = ""
+
+# ----------------------------
+# UI Workflow
+# ----------------------------
+
+if st.session_state.step == "upload":
+    uploaded = st.file_uploader("📄 Upload your resume (PDF)", type=["pdf"])
     if uploaded:
         st.session_state.resume_text = extract_text_from_pdf(uploaded)
-        st.session_state.stage = "extract_skills"
+        with st.spinner("Extracting skills..."):
+            st.session_state.skills = extract_skills(st.session_state.resume_text)
+        st.session_state.step = "confirm_skills"
         st.rerun()
 
-# 2. Extract skills using Groq
-elif st.session_state.stage == "extract_skills":
-    with st.spinner("Extracting skills..."):
-        prompt = f"Extract key technical skills from this resume text:\n{st.session_state.resume_text}\nReturn as comma-separated list only."
-        st.session_state.skills = call_groq(prompt)
-    st.session_state.stage = "confirm_skills"
-    st.rerun()
-
-# 3. Confirm or edit skills
-elif st.session_state.stage == "confirm_skills":
-    st.markdown("### Skills Found:")
-    st.success(st.session_state.skills)
-    confirm = st.radio("Are these skills correct?", ["Yes", "No"])
-    if confirm == "Yes":
-        st.session_state.stage = "generate_questions"
+elif st.session_state.step == "confirm_skills":
+    st.markdown("### 🧠 Skills extracted:")
+    st.success(", ".join(st.session_state.skills))
+    choice = st.radio("Are these correct?", ["Yes", "No"])
+    if choice == "Yes":
+        with st.spinner("Generating questions..."):
+            questions_text = generate_questions(st.session_state.skills)
+            st.session_state.questions = [q.strip() for q in questions_text.split("\n\n") if q.strip()]
+        st.session_state.step = "qa"
         st.rerun()
     else:
-        manual = st.text_input("Enter correct skills (comma-separated):")
+        manual = st.text_input("List your core skills separated by commas")
         if manual:
-            st.session_state.skills = manual
-            st.session_state.stage = "generate_questions"
+            st.session_state.skills = [s.strip() for s in manual.split(",")]
+            with st.spinner("Generating questions..."):
+                questions_text = generate_questions(st.session_state.skills)
+                st.session_state.questions = [q.strip() for q in questions_text.split("\n\n") if q.strip()]
+            st.session_state.step = "qa"
             st.rerun()
 
-# 4. Generate questions
-elif st.session_state.stage == "generate_questions":
-    with st.spinner("Generating questions..."):
-        prompt = f"""
-Generate 5 interview questions based on these skills: {st.session_state.skills}.
-Include:
-- 2 MCQ (with Options: A, B, C, D and correct)
-- 1 MSQ (multiple correct answers)
-- 2 Long Answer
-
-Use format:
-Q: What is X?
-Options: A. ..., B. ..., C. ..., D. ...
-Correct: B
-"""
-        raw = call_groq(prompt)
-        st.session_state.questions = parse_questions(raw)
-    st.session_state.stage = "ask_questions"
-    st.rerun()
-
-# 5. Ask questions one by one
-elif st.session_state.stage == "ask_questions":
-    q_idx = st.session_state.current_question
+elif st.session_state.step == "qa":
+    q_idx = len(st.session_state.answers)
     if q_idx < len(st.session_state.questions):
-        q = st.session_state.questions[q_idx]
-        st.markdown(f"### Question {q_idx + 1}: {q['question']}")
-        user_answer = None
-
-        if q["type"] == "mcq":
-            user_answer = st.radio("Choose one:", q["options"])
-        elif q["type"] == "msq":
-            user_answer = st.multiselect("Choose all that apply:", q["options"])
-        else:
-            user_answer = st.text_area("Your Answer:")
-
-        if st.button("Submit Answer"):
-            st.session_state.answers.append(user_answer)
-            st.session_state.current_question += 1
+        current_q = st.session_state.questions[q_idx]
+        st.markdown(f"**Q{q_idx+1}:**\n{current_q}")
+        user_ans = st.text_input("Your Answer:", key=f"ans_{q_idx}")
+        if user_ans:
+            st.session_state.answers.append({"question": current_q, "answer": user_ans})
             st.rerun()
     else:
-        st.session_state.stage = "evaluate"
+        # Evaluate the long answer (assumed to be the last)
+        last_q = st.session_state.questions[-1]
+        last_ans = st.session_state.answers[-1]["answer"]
+        with st.spinner("Generating feedback..."):
+            st.session_state.feedback = evaluate_long_answer(last_q, last_ans)
+            st.session_state.topics = generate_prep_topics(st.session_state.skills)
+        st.session_state.step = "result"
         st.rerun()
 
-# 6. Evaluate responses
-elif st.session_state.stage == "evaluate":
-    score = 0
-    feedback = []
-
-    for i, q in enumerate(st.session_state.questions):
-        user_ans = st.session_state.answers[i]
-        if q["type"] == "mcq":
-            correct = q["correct"]
-            if user_ans.startswith(correct):
-                score += 1
-        elif q["type"] == "msq":
-            correct_set = set(q["correct"])
-            selected_set = set([opt[0] for opt in user_ans])
-            if correct_set == selected_set:
-                score += 1
-        else:
-            # Evaluate long answers with Groq
-            long_feedback = call_groq(f"Evaluate this answer:\nQuestion: {q['question']}\nAnswer: {user_ans}\nGive detailed feedback:")
-            feedback.append(f"**Q{i+1} Feedback:** {long_feedback}")
-
-    final_feedback = f"🧠 You scored {score} out of 5.\n\n" + "\n\n".join(feedback)
-    st.session_state.feedback = final_feedback
-    st.session_state.stage = "result"
-    st.rerun()
-
-# 7. Show results
-elif st.session_state.stage == "result":
-    st.success("✅ Interview Completed!")
-    st.markdown(st.session_state.feedback)
+elif st.session_state.step == "result":
+    st.success("✅ Interview complete! Here's your feedback:")
+    st.markdown(f"### 📝 Long Answer Feedback\n{st.session_state.feedback}")
+    st.markdown("### 📌 Topics You Should Prepare:")
+    st.markdown(st.session_state.topics)
+    st.balloons()
