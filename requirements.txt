@@ -7,3 +7,4 @@ streamlit-chat
 ollama
 PyPDF2
 openai
+langdetect
