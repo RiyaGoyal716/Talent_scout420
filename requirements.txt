@@ -8,3 +8,4 @@ ollama
 PyPDF2
 openai
 langdetect
+docx2txt
