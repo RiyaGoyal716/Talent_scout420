@@ -4,3 +4,4 @@ PyMuPDF
 requests
 python-dotenv
 streamlit-chat
+ollama
