@@ -1,147 +1,137 @@
 import streamlit as st
-from PyPDF2 import PdfReader
-import docx2txt
+import os
+import requests
+from dotenv import load_dotenv
 import re
-import json
 
-# --- Your existing imports and Groq API setup ---
+load_dotenv()
 
-# Initialize session state variables
-if "all_responses" not in st.session_state:
-    st.session_state.all_responses = []
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_URL = "https://api.groq.ai/v1/llama3/generate"  # Replace if your actual endpoint differs
 
-if "topic_questions" not in st.session_state:
-    st.session_state.topic_questions = []
+st.set_page_config(page_title="Groq Interview Question Generator", page_icon="🎯")
 
-if "candidate_info" not in st.session_state:
-    st.session_state.candidate_info = {}
+# Initialize session state
+if "topic" not in st.session_state:
+    st.session_state.topic = None
+if "batch_num" not in st.session_state:
+    st.session_state.batch_num = 0
+if "history" not in st.session_state:
+    st.session_state.history = []
 
-if "end_chat" not in st.session_state:
-    st.session_state.end_chat = False
-
-# ----------------------------
-# Helper function: Extract text from uploaded resume
-# ----------------------------
-def extract_text_from_resume(uploaded_file):
-    if uploaded_file.type == "application/pdf":
-        pdf_reader = PdfReader(uploaded_file)
-        text = ""
-        for page in pdf_reader.pages:
-            text += page.extract_text() or ""
-        return text
-    elif uploaded_file.type == "text/plain":
-        return uploaded_file.getvalue().decode("utf-8")
-    elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-        return docx2txt.process(uploaded_file)
-    else:
-        return ""
-
-# ----------------------------
-# Helper function: Call your Groq LLM API for response
-# ----------------------------
-def generate_llm_response(prompt):
-    # Replace with your Groq API call, example:
-    # response = groq_llm_api_call(prompt)
-    # For demo, we return a mock JSON string:
-    mock_response = json.dumps({
-        "Full Name": "John Doe",
-        "Email": "john.doe@example.com",
-        "Phone Number": "+1-234-567-890",
-        "Years of Experience": "5",
-        "Position(s) applied for": "Software Engineer",
-        "Current Location": "San Francisco, CA",
-        "Tech Stack": "Python, Java, AWS"
-    })
-    return mock_response
-
-# ----------------------------
-# Extract candidate info from resume text using LLM
-# ----------------------------
-def extract_candidate_info_from_text(resume_text):
-    prompt = f"""
-You are an AI assistant. Extract the following candidate details from the resume text below:
-- Full Name
-- Email
-- Phone Number
-- Years of Experience
-- Position(s) applied for
-- Current Location
-- Tech Stack
-
-If any info is not available, reply with 'Not mentioned'.
-
-Resume Text:
-\"\"\"
-{resume_text}
-\"\"\"
-
-Provide the info as a JSON object only.
-"""
-    response = generate_llm_response(prompt)
+def call_groq_api(prompt):
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "prompt": prompt,
+        "max_tokens": 512,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "stop": ["###"]
+    }
     try:
-        candidate_info = json.loads(response)
-    except Exception:
-        candidate_info = {"Extracted Info": response}
-    return candidate_info
+        response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        text = result.get("choices", [{}])[0].get("text", "").strip()
+        return text
+    except Exception as e:
+        return f"Error calling Groq API: {e}"
 
-# ----------------------------
-# Generate technical questions based on topic (demo)
-# ----------------------------
-def get_technical_questions(topic):
-    # Replace with your actual question generation logic or API call
-    return f"1. Explain the basics of {topic}.\n2. What are advanced concepts in {topic}?\n3. How do you apply {topic} in real projects?"
+def generate_prompt(topic, batch_num):
+    return (
+        f"Generate a batch of 10-15 interview questions for the role/topic '{topic}'. "
+        f"Include a mix of easy to advanced level questions, including situational questions, coding snippets, "
+        f"and questions typically asked in MNC interviews. "
+        f"Format output as numbered questions with brief answers. "
+        f"This is batch number {batch_num}.\n\n"
+        f"Batch {batch_num} questions:\n"
+    )
 
-# ----------------------------
-# Chat logic after resume processing
-# ----------------------------
-def chat_logic(user_input):
-    if user_input.lower() in ["exit", "quit", "bye", "end"]:
-        st.session_state.end_chat = True
-        # You can add your data saving logic here if needed
-        return "✅ Thank you for chatting with TalentScout! We’ll be in touch shortly. Goodbye! 👋"
+def parse_and_display_questions(text):
+    """
+    Parses numbered questions and answers from text and displays nicely in Streamlit.
+    Expected format: 
+    1. Question?
+       Answer: ...
+    """
+    # Split by numbered questions (e.g. 1. 2. 3.)
+    pattern = r"(\d+)\.\s*(.+?)(?=(\n\d+\.|\Z))"
+    matches = re.findall(pattern, text, flags=re.S)
+    if not matches:
+        # Fallback: show raw text if parsing fails
+        st.text(text)
+        return
 
-    if "generate questions on" in user_input.lower():
-        topic = user_input.lower().split("generate questions on")[-1].strip()
-        qns = get_technical_questions(topic)
-        st.session_state.topic_questions.append((topic, qns))
-        st.session_state.all_responses.append({"User Input": user_input, "AI Response": qns})
-        return f"Here are your questions on **{topic}**:\n\n{qns}"
+    for num, qa_text, _ in matches:
+        # Try to split question and answer if "Answer:" present
+        parts = re.split(r"Answer\s*:\s*", qa_text, maxsplit=1, flags=re.I)
+        question = parts[0].strip()
+        answer = parts[1].strip() if len(parts) > 1 else None
 
-    return "🤖 You can ask me to generate technical questions by typing 'Generate questions on ...' or type 'end' to finish."
+        st.markdown(f"**Q{num}. {question}**")
+        if answer:
+            # Detect code snippets inside answer (simple heuristic for ``` or indentation)
+            if "```" in answer:
+                st.markdown(f"**Answer:**")
+                st.code(answer.strip("``` \n"))
+            else:
+                st.markdown(f"**Answer:** {answer}")
+        else:
+            st.markdown("_Answer not provided._")
+        st.markdown("---")
 
-# ----------------------------
-# Streamlit UI Layout
-# ----------------------------
+def main():
+    st.title("🎯 Groq Interview Question Generator")
+    st.write(
+        "Type commands below:\n"
+        "- `Generate questions on <topic>` to start a new question batch.\n"
+        "- `continue` to get the next batch of questions.\n"
+        "- `exit` to reset the session."
+    )
 
-st.set_page_config(page_title="TalentScout AI Interviewer", page_icon="🤖")
+    user_input = st.text_input("Your command or topic:", key="user_input")
 
-st.title("🤖 TalentScout AI Interviewer")
-
-with st.sidebar:
-    st.header("Upload Resume")
-    uploaded_file = st.file_uploader("📄 Upload Resume (PDF, DOCX, TXT)", type=["pdf", "txt", "docx"])
-    if uploaded_file:
-        with st.spinner("Extracting text and info from resume..."):
-            resume_text = extract_text_from_resume(uploaded_file)
-            candidate_info = extract_candidate_info_from_text(resume_text)
-            st.session_state.candidate_info = candidate_info
-            st.session_state.candidate_info["Resume Excerpt"] = resume_text[:300] + "..."
-            # For demo, add some questions from resume content
-            topic_q = get_technical_questions("Resume Content")
-            st.session_state.topic_questions.append(("Resume Content", topic_q))
-            st.session_state.all_responses.append({"Resume Extract": resume_text[:300], "Questions": topic_q})
-        st.success("✅ Resume processed and candidate info extracted.")
-
-if st.session_state.candidate_info:
-    with st.sidebar.expander("👤 Extracted Candidate Info", expanded=True):
-        for k, v in st.session_state.candidate_info.items():
-            st.markdown(f"**{k}:** {v}")
-
-if not st.session_state.end_chat:
-    user_input = st.text_input("💬 Enter your message or 'Generate questions on <topic>'", key="input")
     if user_input:
-        response = chat_logic(user_input)
-        st.markdown(f"**TalentScout:** {response}")
+        user_input_lower = user_input.strip().lower()
 
-else:
-    st.info("Chat session ended. Please refresh to start a new session.")
+        if user_input_lower.startswith("generate questions on"):
+            topic = user_input[len("generate questions on"):].strip()
+            if not topic:
+                st.warning("Please specify a topic after 'Generate questions on'")
+                return
+            st.session_state.topic = topic
+            st.session_state.batch_num = 1
+            st.session_state.history = []
+        elif user_input_lower == "continue":
+            if not st.session_state.topic:
+                st.warning("Please start by typing: Generate questions on <topic>")
+                return
+            st.session_state.batch_num += 1
+        elif user_input_lower in ["exit", "quit", "stop"]:
+            st.success("Session ended. Start again by typing 'Generate questions on <topic>'.")
+            st.session_state.topic = None
+            st.session_state.batch_num = 0
+            st.session_state.history = []
+            return
+        else:
+            st.info("Invalid command. Use 'Generate questions on <topic>', 'continue', or 'exit'.")
+            return
+
+        prompt = generate_prompt(st.session_state.topic, st.session_state.batch_num)
+        with st.spinner(f"Generating batch {st.session_state.batch_num} questions for '{st.session_state.topic}'..."):
+            response_text = call_groq_api(prompt)
+
+        if response_text.startswith("Error"):
+            st.error(response_text)
+            return
+
+        st.session_state.history.append((st.session_state.batch_num, response_text))
+
+        st.markdown(f"## Batch {st.session_state.batch_num} Questions for **{st.session_state.topic}**")
+        parse_and_display_questions(response_text)
+
+if __name__ == "__main__":
+    main()
