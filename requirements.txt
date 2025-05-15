@@ -1,0 +1,6 @@
+streamlit
+python-docx
+PyMuPDF
+requests
+python-dotenv
+streamlit-chat
