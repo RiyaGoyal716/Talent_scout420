@@ -6,7 +6,14 @@ import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
 import requests
-from langdetect import detect
+from streamlit.runtime.scriptrunner import RerunException, RerunData
+
+# Safe rerun function to avoid AttributeError on st.experimental_rerun
+def safe_rerun():
+    try:
+        raise RerunException(RerunData())
+    except RerunException:
+        pass
 
 # ----------------------------
 # Load Environment Variables
@@ -121,10 +128,6 @@ def extract_text_from_resume(uploaded_file):
     else:
         return "Unsupported file type."
 
-def translate_to_english(text):
-    prompt = f"""You are a helpful assistant. Translate the following text to English, preserving the meaning and technical terms:\n\n{text}"""
-    return generate_llm_response(prompt)
-
 # ----------------------------
 # Tech Question Generator
 # ----------------------------
@@ -231,24 +234,10 @@ with st.sidebar:
     uploaded_file = st.file_uploader("📄 Upload Resume (PDF, DOCX, TXT)", type=["pdf", "txt", "docx"])
     if uploaded_file:
         resume_text = extract_text_from_resume(uploaded_file)
-        detected_lang = detect(resume_text)
-
-        if detected_lang != "en":
-            st.warning("🌐 Non-English resume detected. Translating to English...")
-            translated_resume = translate_to_english(resume_text[:1000])
-            st.session_state.candidate_info["Original Language"] = detected_lang
-            st.session_state.candidate_info["Translated Resume"] = translated_resume[:300] + "..."
-            topic_q = get_technical_questions(translated_resume[:600])
-        else:
-            translated_resume = resume_text
-            topic_q = get_technical_questions(resume_text[:600])
-
-        st.session_state.candidate_info["Resume"] = translated_resume[:300] + "..."
+        st.session_state.candidate_info["Resume"] = resume_text[:300] + "..."
+        topic_q = get_technical_questions(resume_text[:600])
         st.session_state.topic_questions.append(("Resume Content", topic_q))
-        st.session_state.all_responses.append({
-            "Resume Extract": translated_resume[:300],
-            "Questions": topic_q
-        })
+        st.session_state.all_responses.append({"Resume Extract": resume_text[:300], "Questions": topic_q})
         st.success("Resume processed. Questions based on resume will appear in chat.")
 
 # ----------------------------
@@ -262,7 +251,7 @@ if not st.session_state.end_chat:
         bot_response = chat_logic(user_prompt)
         time.sleep(0.2)
         st.session_state.messages.append({"role": "assistant", "content": bot_response})
-        st.experimental_rerun()
+        safe_rerun()
 else:
     st.success("Conversation has ended. Refresh the page to restart.")
     with st.expander("📄 Candidate Summary"):
