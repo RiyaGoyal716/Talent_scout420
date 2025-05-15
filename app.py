@@ -1,252 +1,139 @@
-import streamlit as st
-from streamlit_chat import message
+# ai_interviewer.py
 import os
-import time
-import pandas as pd
-from datetime import datetime
+import openai
+import streamlit as st
 from dotenv import load_dotenv
-import requests
+from PyPDF2 import PdfReader
+from docx import Document
+from io import StringIO
 
-# ----------------------------
-# Load Environment Variables
-# ----------------------------
+# Load .env and API keys
 load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+openai.api_key = os.getenv("GROQ_API_KEY")
+openai.api_base = "https://api.groq.com/openai/v1"
 
-# ----------------------------
-# Set Custom Page Config
-# ----------------------------
-st.set_page_config(page_title="TalentScout AI - Hiring Assistant", page_icon="🧠", layout="centered")
+# LLM Config
+MODEL = "llama3-70b-8192"
 
-# ----------------------------
-# Custom CSS Styling
-# ----------------------------
-st.markdown("""
-    <style>
-    body {
-        background-color: #f5f7fa;
-    }
-    .st-emotion-cache-1avcm0n {
-        padding-top: 1rem;
-    }
-    .stChatInputContainer {
-        background: #fff;
-        border-top: 2px solid #ccc;
-    }
-    .stButton button {
-        background-color: #003366;
-        color: white;
-        font-weight: bold;
-        border-radius: 8px;
-    }
-    .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
-        color: #003366;
-    }
-    .chat-container {
-        background-color: #ffffff;
-        padding: 1.2rem;
-        border-radius: 12px;
-        box-shadow: 0px 4px 12px rgba(0,0,0,0.08);
-        margin-top: 1rem;
-    }
-    .info-box {
-        background-color: #eaf3ff;
-        padding: 0.8rem;
-        border-radius: 10px;
-        margin-bottom: 10px;
-        font-size: 15px;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# ----------------------------
-# App Header
-# ----------------------------
-st.markdown("## 🧠 TalentScout AI Assistant")
-st.caption("Your intelligent virtual recruiter for smarter hiring decisions.")
-
-# ----------------------------
-# State Initialization
-# ----------------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "stage" not in st.session_state:
-    st.session_state.stage = "greeting"
-if "candidate_info" not in st.session_state:
-    st.session_state.candidate_info = {}
-if "topic_questions" not in st.session_state:
-    st.session_state.topic_questions = []
-if "end_chat" not in st.session_state:
-    st.session_state.end_chat = False
-if "all_responses" not in st.session_state:
-    st.session_state.all_responses = []
-
-# ----------------------------
-# LLM API Wrapper
-# ----------------------------
-def generate_llm_response(prompt):
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": "llama3-8b-8192",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7
-    }
-    try:
-        response = requests.post(GROQ_API_URL, headers=headers, json=data)
-        return response.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return f"❌ Error: {e}"
-
-# ----------------------------
-# Resume Upload & Processing
-# ----------------------------
 def extract_text_from_resume(uploaded_file):
-    if uploaded_file.type == "application/pdf":
-        import fitz  # PyMuPDF
-        doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
-        text = " ".join([page.get_text() for page in doc])
-        return text
-    elif uploaded_file.type == "text/plain":
-        return uploaded_file.read().decode("utf-8")
-    elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-        import docx
-        doc = docx.Document(uploaded_file)
-        return " ".join([para.text for para in doc.paragraphs])
+    text = ""
+    if uploaded_file.name.endswith('.pdf'):
+        reader = PdfReader(uploaded_file)
+        for page in reader.pages:
+            text += page.extract_text() or ""
+    elif uploaded_file.name.endswith('.docx'):
+        doc = Document(uploaded_file)
+        for para in doc.paragraphs:
+            text += para.text + "\n"
+    elif uploaded_file.name.endswith('.txt'):
+        stringio = StringIO(uploaded_file.getvalue().decode("utf-8"))
+        text = stringio.read()
     else:
-        return "Unsupported file type."
+        st.warning("Unsupported file format. Upload PDF, DOCX, or TXT.")
+    return text.strip()
 
-# ----------------------------
-# Tech Question Generator
-# ----------------------------
-def get_technical_questions(tech_stack):
+def generate_interview_questions(resume_text, job_role, level, topic=None):
     prompt = f"""
-You are an AI interviewer. Generate 3 beginner, 3 intermediate, and 3 advanced technical interview questions based on the following technologies or topics:
-{tech_stack}
-"""
-    return generate_llm_response(prompt)
+You are an AI Interviewer. Your task is to generate a set of {level} level interview questions for a candidate applying for the role of {job_role}.
+If a topic is specified (like databases, ML, cloud, etc.), generate questions focused on that topic.
 
-# ----------------------------
-# Conversation Flow Logic
-# ----------------------------
-def chat_logic(user_input):
-    info = st.session_state.candidate_info
-    stage = st.session_state.stage
+Resume of the candidate:
+\"\"\"
+{resume_text}
+\"\"\"
 
-    if user_input.lower() in ["exit", "quit", "bye", "end"]:
-        st.session_state.end_chat = True
-        save_data_to_csv()
-        return "✅ Thank you for chatting with TalentScout! We’ll be in touch shortly. Goodbye! 👋"
+Generate 3 relevant questions and wait for user response before continuing.
+If the user says "next topic: XYZ", switch to that topic and generate new questions.
+    """
+    if topic:
+        prompt += f"\n\nCurrent topic: {topic}"
+    
+    messages = [{"role": "user", "content": prompt}]
+    try:
+        response = openai.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=0.6,
+            max_tokens=600
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Error generating questions: {e}"
 
-    if "generate questions on" in user_input.lower():
-        topic = user_input.lower().split("generate questions on")[-1].strip()
-        qns = get_technical_questions(topic)
-        st.session_state.topic_questions.append((topic, qns))
-        st.session_state.all_responses.append({"User Input": user_input, "AI Response": qns})
-        return f"Here are your questions on **{topic}**:\n\n{qns}"
-
-    if stage == "greeting":
-        st.session_state.stage = "full_name"
-        return "👋 Welcome! I’m your virtual assistant from TalentScout.\n\nCan I know your **full name**?"
-
-    elif stage == "full_name":
-        info["Full Name"] = user_input
-        st.session_state.stage = "email"
-        return "📧 What’s your **email address**?"
-
-    elif stage == "email":
-        info["Email"] = user_input
-        st.session_state.stage = "phone"
-        return "📞 Could you share your **phone number**?"
-
-    elif stage == "phone":
-        info["Phone"] = user_input
-        st.session_state.stage = "experience"
-        return "🧑‍💻 How many **years of experience** do you have?"
-
-    elif stage == "experience":
-        info["Experience"] = user_input
-        st.session_state.stage = "position"
-        return "🎯 What **position(s)** are you applying for?"
-
-    elif stage == "position":
-        info["Position"] = user_input
-        st.session_state.stage = "location"
-        return "📍 Where are you **currently located**?"
-
-    elif stage == "location":
-        info["Location"] = user_input
-        st.session_state.stage = "tech_stack"
-        return "💻 Please list your **tech stack** (e.g., Python, React, MongoDB)..."
-
-    elif stage == "tech_stack":
-        info["Tech Stack"] = user_input
-        tech_q = get_technical_questions(user_input)
-        st.session_state.topic_questions.append((user_input, tech_q))
-        st.session_state.all_responses.append({"Tech Stack": user_input, "Questions": tech_q})
-        st.session_state.stage = "done"
-        return f"🧪 Here are some questions based on your tech stack:\n\n{tech_q}\n\n✅ That’s all I need for now. You can ask me to generate questions on any topic by typing: 'Generate questions on ...'"
-
-    else:
-        return "❓ I didn’t quite get that. You can continue our chat or type 'end' to finish."
-
-# ----------------------------
-# Save to CSV
-# ----------------------------
-def save_data_to_csv():
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    info = st.session_state.candidate_info
-    all_qas = st.session_state.all_responses
-
-    # Save candidate info
-    df_info = pd.DataFrame([info])
-    df_info.to_csv(f"candidate_info_{timestamp}.csv", index=False)
-
-    # Save Q&A log
-    df_qas = pd.DataFrame(all_qas)
-    df_qas.to_csv(f"candidate_qna_{timestamp}.csv", index=False)
-
-# ----------------------------
-# Chat Interface
-# ----------------------------
-with st.container():
-    for i, msg in enumerate(st.session_state.messages):
-        message(msg["content"], is_user=msg["role"] == "user", key=str(i))
-
-# ----------------------------
-# File Upload Section
-# ----------------------------
-with st.sidebar:
-    uploaded_file = st.file_uploader("📄 Upload Resume (PDF, DOCX, TXT)", type=["pdf", "txt", "docx"])
+# Streamlit Frontend
+def main():
+    st.title("🧠 AI Interviewer - SmartHire")
+    uploaded_file = st.file_uploader("Upload your Resume", type=["pdf", "docx", "txt"])
+    
     if uploaded_file:
         resume_text = extract_text_from_resume(uploaded_file)
-        st.session_state.candidate_info["Resume"] = resume_text[:300] + "..."
-        topic_q = get_technical_questions(resume_text[:600])
-        st.session_state.topic_questions.append(("Resume Content", topic_q))
-        st.session_state.all_responses.append({"Resume Extract": resume_text[:300], "Questions": topic_q})
-        st.success("Resume processed. Questions based on resume will appear in chat.")
+        st.success("Resume successfully parsed!")
 
-# ----------------------------
-# Chat Input
-# ----------------------------
-if not st.session_state.end_chat:
-    user_prompt = st.chat_input("Type here to talk to TalentScout...")
+        job_role = st.text_input("Enter the Job Role (e.g., Data Scientist, Software Engineer)")
+        level = st.selectbox("Select Difficulty Level", ["Basic", "Intermediate", "Advanced"])
+        topic = st.text_input("Optional: Specify a topic (e.g., Python, System Design, Cloud)")
 
-    if user_prompt:
-        st.session_state.messages.append({"role": "user", "content": user_prompt})
-        bot_response = chat_logic(user_prompt)
-        time.sleep(0.2)
-        st.session_state.messages.append({"role": "assistant", "content": bot_response})
-        st.rerun()
-else:
-    st.success("Conversation has ended. Refresh the page to restart.")
-    with st.expander("📄 Candidate Summary"):
-        for k, v in st.session_state.candidate_info.items():
-            st.markdown(f"**{k}:** {v}")
+        if st.button("Start Interview"):
+            if job_role:
+                questions = generate_interview_questions(resume_text, job_role, level.lower(), topic)
+                st.session_state.chat_history = [{"role": "ai", "content": questions}]
+                st.session_state.resume_text = resume_text
+                st.session_state.job_role = job_role
+                st.session_state.level = level.lower()
+                st.session_state.topic = topic
+            else:
+                st.warning("Please enter the job role.")
 
-    with st.expander("🧾 All Questions Asked"):
-        for topic, qns in st.session_state.topic_questions:
-            st.markdown(f"### 🔹 {topic}\n{qns}")
+    # Chat Interface
+    if "chat_history" in st.session_state:
+        st.subheader("🗨️ Interview Chat")
+        for msg in st.session_state.chat_history:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+        
+        user_input = st.chat_input("Your Answer / Ask for new topic...")
+
+        if user_input:
+            with st.chat_message("user"):
+                st.markdown(user_input)
+            st.session_state.chat_history.append({"role": "user", "content": user_input})
+
+            # Detect topic switch
+            if user_input.lower().startswith("next topic:"):
+                new_topic = user_input.split("next topic:")[-1].strip()
+                new_qs = generate_interview_questions(
+                    st.session_state.resume_text,
+                    st.session_state.job_role,
+                    st.session_state.level,
+                    new_topic
+                )
+                st.session_state.chat_history.append({"role": "ai", "content": new_qs})
+            else:
+                # Continue in same topic
+                followup_prompt = f"""
+Here is the candidate's answer:
+\"\"\"
+{user_input}
+\"\"\"
+
+Please provide the next 2 {st.session_state.level} questions for the role of {st.session_state.job_role}.
+{"Focus on topic: " + st.session_state.topic if st.session_state.topic else ""}
+Resume:
+\"\"\"
+{st.session_state.resume_text}
+\"\"\"
+"""
+                try:
+                    response = openai.chat.completions.create(
+                        model=MODEL,
+                        messages=[{"role": "user", "content": followup_prompt}],
+                        temperature=0.6,
+                        max_tokens=500
+                    )
+                    followup_qs = response.choices[0].message.content.strip()
+                    st.session_state.chat_history.append({"role": "ai", "content": followup_qs})
+                except Exception as e:
+                    st.session_state.chat_history.append({"role": "ai", "content": f"Error: {e}"})
+
+if __name__ == "__main__":
+    main()
