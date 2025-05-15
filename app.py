@@ -1,42 +1,29 @@
 import streamlit as st
 from streamlit_chat import message
-import ollama
+from dotenv import load_dotenv
+import os
 import time
-import PyPDF2
-import docx
+import fitz  # PyMuPDF
+import requests
+import pandas as pd
+from datetime import datetime
 
 # ----------------------------
-# Page Config and Styling
+# Load Environment Variables
 # ----------------------------
-st.set_page_config(page_title="TalentScout AI - Hiring Assistant", page_icon="🧠", layout="centered")
+load_dotenv()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+# ----------------------------
+# Page Config & Styles
+# ----------------------------
+st.set_page_config(page_title="TalentScout AI", page_icon="🧠", layout="centered")
 
 st.markdown("""
     <style>
-    body { background-color: #f5f7fa; }
-    .stChatInputContainer { background: #fff; border-top: 2px solid #ccc; }
-    .stButton button {
-        background-color: #003366;
-        color: white;
-        font-weight: bold;
-        border-radius: 8px;
-    }
-    .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
-        color: #003366;
-    }
-    .chat-container {
-        background-color: #ffffff;
-        padding: 1.2rem;
-        border-radius: 12px;
-        box-shadow: 0px 4px 12px rgba(0,0,0,0.08);
-        margin-top: 1rem;
-    }
-    .info-box {
-        background-color: #eaf3ff;
-        padding: 0.8rem;
-        border-radius: 10px;
-        margin-bottom: 10px;
-        font-size: 15px;
-    }
+    .stButton button { background-color: #003366; color: white; font-weight: bold; border-radius: 8px; }
+    .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 { color: #003366; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -46,51 +33,70 @@ st.caption("Your intelligent virtual recruiter for smarter hiring decisions.")
 # ----------------------------
 # State Initialization
 # ----------------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "stage" not in st.session_state:
-    st.session_state.stage = "greeting"
-if "candidate_info" not in st.session_state:
-    st.session_state.candidate_info = {}
-if "tech_questions" not in st.session_state:
-    st.session_state.tech_questions = []
-if "end_chat" not in st.session_state:
-    st.session_state.end_chat = False
+if "messages" not in st.session_state: st.session_state.messages = []
+if "stage" not in st.session_state: st.session_state.stage = "greeting"
+if "candidate_info" not in st.session_state: st.session_state.candidate_info = {}
+if "tech_questions" not in st.session_state: st.session_state.tech_questions = []
+if "end_chat" not in st.session_state: st.session_state.end_chat = False
+if "resume_questions" not in st.session_state: st.session_state.resume_questions = ""
 
 # ----------------------------
-# LLM Wrapper
+# LLM Response via Groq API
 # ----------------------------
 def generate_llm_response(prompt):
-    with st.spinner("Thinking..."):
-        response = ollama.chat(model="mistral", messages=[{"role": "user", "content": prompt}])
-        return response["message"]["content"]
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama3-8b-8192",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.5
+    }
+    response = requests.post(GROQ_URL, headers=headers, json=payload)
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"]
 
 # ----------------------------
-# Resume Extraction
-# ----------------------------
-def extract_text_from_resume(file):
-    if file.type == "application/pdf":
-        reader = PyPDF2.PdfReader(file)
-        return "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
-    elif file.type in ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"]:
-        doc = docx.Document(file)
-        return "\n".join([para.text for para in doc.paragraphs])
-    else:
-        return "❌ Unsupported file format. Please upload a PDF or DOCX."
-
-# ----------------------------
-# Technical Question Generator
+# Question Generators
 # ----------------------------
 def get_technical_questions(tech_stack):
-    prompt = f"You are an AI recruiter. Generate 3 concise technical questions EACH for the following technologies:\n{tech_stack}."
+    prompt = f"You are an AI recruiter. Generate 3 short technical interview questions for each of the following technologies:\n{tech_stack}."
     return generate_llm_response(prompt)
 
-def generate_questions_from_resume(text):
-    prompt = f"Based on the following resume text, generate 5 concise technical interview questions:\n\n{text}\n\nQuestions:"
+def get_questions_from_resume(resume_text):
+    prompt = f"You are an AI interviewer. Read the resume below and generate 5 job-relevant technical interview questions based on the content:\n\n{resume_text}"
     return generate_llm_response(prompt)
 
 # ----------------------------
-# Chatbot Logic
+# Resume Parsing
+# ----------------------------
+def extract_text_from_resume(uploaded_file):
+    if uploaded_file is not None:
+        with fitz.open(stream=uploaded_file.read(), filetype="pdf") as doc:
+            text = ""
+            for page in doc:
+                text += page.get_text()
+            return text.strip()
+    return ""
+
+# ----------------------------
+# Save Candidate Data
+# ----------------------------
+def save_candidate_data():
+    info = st.session_state.candidate_info
+    if not info: return
+
+    df = pd.DataFrame([info])
+    df["Timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    df["Resume Questions"] = st.session_state.resume_questions
+    if os.path.exists("candidate_data.csv"):
+        df.to_csv("candidate_data.csv", mode="a", index=False, header=False)
+    else:
+        df.to_csv("candidate_data.csv", index=False)
+
+# ----------------------------
+# Chat Logic
 # ----------------------------
 def chat_logic(user_input):
     info = st.session_state.candidate_info
@@ -98,6 +104,7 @@ def chat_logic(user_input):
 
     if user_input.lower() in ["exit", "quit", "bye", "end"]:
         st.session_state.end_chat = True
+        save_candidate_data()
         return "✅ Thank you for chatting with TalentScout! We’ll be in touch shortly. Goodbye! 👋"
 
     if stage == "greeting":
@@ -149,35 +156,39 @@ def chat_logic(user_input):
         return "❓ Hmm, I didn’t quite get that. Could you please rephrase?"
 
 # ----------------------------
-# Resume Upload UI
+# Resume Upload Section
 # ----------------------------
-with st.expander("📄 Upload Resume for Smart Questions"):
-    uploaded_file = st.file_uploader("Upload your resume (PDF or DOCX)", type=["pdf", "docx"])
+with st.expander("📄 Upload Resume (PDF) for Question Generation"):
+    uploaded_file = st.file_uploader("Upload your resume", type=["pdf"])
     if uploaded_file:
         resume_text = extract_text_from_resume(uploaded_file)
-        st.success("✅ Resume uploaded successfully.")
-        if st.button("Generate Questions from Resume"):
-            questions = generate_questions_from_resume(resume_text)
-            st.session_state.messages.append({"role": "assistant", "content": f"📄 Based on your resume, here are some tailored questions:\n\n{questions}"})
-            st.rerun()
+        if resume_text:
+            st.success("✅ Resume processed!")
+            with st.spinner("Generating interview questions..."):
+                questions = get_questions_from_resume(resume_text)
+                st.session_state.resume_questions = questions
+            st.markdown("### 🧠 AI-Generated Interview Questions from Resume:")
+            st.markdown(questions)
 
 # ----------------------------
 # Chat Interface
 # ----------------------------
-with st.container():
-    for i, msg in enumerate(st.session_state.messages):
-        message(msg["content"], is_user=msg["role"] == "user", key=str(i))
+for i, msg in enumerate(st.session_state.messages):
+    message(msg["content"], is_user=msg["role"] == "user", key=str(i))
 
 if not st.session_state.end_chat:
-    user_prompt = st.chat_input("Type here to talk to TalentScout...")
+    user_prompt = st.chat_input("Talk to TalentScout...")
+
     if user_prompt:
         st.session_state.messages.append({"role": "user", "content": user_prompt})
         bot_response = chat_logic(user_prompt)
-        time.sleep(0.2)
+        time.sleep(0.3)
         st.session_state.messages.append({"role": "assistant", "content": bot_response})
         st.rerun()
 else:
-    st.success("Conversation has ended. Refresh the page to restart.")
-    with st.expander("📄 Candidate Summary"):
+    st.success("✅ Conversation ended. Refresh the page to start again.")
+    with st.expander("📋 Candidate Summary"):
         for k, v in st.session_state.candidate_info.items():
             st.markdown(f"**{k}:** {v}")
+    if os.path.exists("candidate_data.csv"):
+        st.download_button("📅 Download Chat & Info (CSV)", data=open("candidate_data.csv", "rb"), file_name="candidate_data.csv", mime="text/csv")
