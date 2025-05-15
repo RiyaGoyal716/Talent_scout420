@@ -5,20 +5,13 @@ import requests
 import time
 from dotenv import load_dotenv
 
-# ----------------------------
-# Load environment variables
-# ----------------------------
+# Load environment variables from .env file
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# ----------------------------
-# Streamlit Page Configuration
-# ----------------------------
 st.set_page_config(page_title="TalentScout AI - Hiring Assistant", page_icon="🧠", layout="centered")
 
-# ----------------------------
-# Custom CSS Styling
-# ----------------------------
+# Custom CSS for styling
 st.markdown("""
     <style>
     body {
@@ -54,9 +47,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ----------------------------
-# State Initialization
-# ----------------------------
+# Initialize session state variables
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "stage" not in st.session_state:
@@ -74,9 +65,7 @@ if "answers" not in st.session_state:
 if "end_chat" not in st.session_state:
     st.session_state.end_chat = False
 
-# ----------------------------
-# Groq API Request with error handling
-# ----------------------------
+# Function to send prompt to Groq LLaMA3 API
 def ask_groq(prompt):
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -90,17 +79,12 @@ def ask_groq(prompt):
         res = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
         res.raise_for_status()
         data = res.json()
-        # Debug: show raw response (can comment out after testing)
-        # st.write(data)
         return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         st.error(f"❌ Groq API error: {e}")
-        st.code(res.text if 'res' in locals() else str(e))
         return None
 
-# ----------------------------
-# Parse Resume to extract skills (simulate via Groq)
-# ----------------------------
+# Extract skills from resume text
 def extract_skills_from_resume(resume_text):
     prompt = f"""
 Extract the key technical skills from the following resume text. Provide a comma-separated list of skills only:
@@ -109,55 +93,48 @@ Extract the key technical skills from the following resume text. Provide a comma
 """
     response = ask_groq(prompt)
     if response:
-        # try to parse skills by splitting commas
         skills = [skill.strip() for skill in response.split(",") if skill.strip()]
         return skills
     else:
         return []
 
-# ----------------------------
-# Generate questions based on skills
-# ----------------------------
+# Generate interview questions based on skills
 def generate_questions(skills):
     skills_str = ", ".join(skills)
     prompt = f"""
 You are a technical interviewer.
 
-Generate a list of 5 questions based on these skills: {skills_str}.
+Generate a list of 5 interview questions based on these skills: {skills_str}.
 
 Include a mix of question types: multiple choice (MCQ), multiple select (MSQ), and long answer questions.
 
-Format each question with type info, e.g.:
+Format each question clearly, including options where applicable, like so:
 
-[MCQ] Question here?
+[MCQ] Question text?
 Options:
-A. ...
-B. ...
-C. ...
-D. ...
+A. Option 1
+B. Option 2
+C. Option 3
+D. Option 4
 
-[MSQ] Question here?
+[MSQ] Question text?
 Options:
-A. ...
-B. ...
-C. ...
-D. ...
+A. Option 1
+B. Option 2
+C. Option 3
+D. Option 4
 
-[Long] Question here?
+[Long] Question text?
 """
     response = ask_groq(prompt)
     if response:
-        # split by newlines, filter empty
         questions = [q.strip() for q in response.split("\n\n") if q.strip()]
         return questions
     else:
         return []
 
-# ----------------------------
-# Generate feedback & important topics
-# ----------------------------
+# Generate feedback and important topics
 def generate_feedback_and_topics(answers, skills):
-    # Combine answers and skills to create feedback and topics to prepare
     ans_text = "\n".join([f"Q{i+1}: {a}" for i,a in enumerate(answers)])
     skills_str = ", ".join(skills)
     prompt = f"""
@@ -188,9 +165,7 @@ Important Topics:
     response = ask_groq(prompt)
     return response or "Sorry, feedback generation failed."
 
-# ----------------------------
-# Main chat logic
-# ----------------------------
+# Main chat logic to handle conversation stages
 def chat_logic(user_input):
 
     if user_input.lower() in ["exit", "quit", "bye", "end"]:
@@ -199,9 +174,7 @@ def chat_logic(user_input):
 
     stage = st.session_state.stage
 
-    # Stage: Upload Resume and extract skills
     if stage == "upload_resume":
-        # Normally you'd handle file upload here, but for chat input demo:
         st.session_state.candidate_info["Resume Text"] = user_input
         st.session_state.skills = extract_skills_from_resume(user_input)
         if not st.session_state.skills:
@@ -210,7 +183,6 @@ def chat_logic(user_input):
         skills_str = ", ".join(st.session_state.skills)
         return f"🔍 We found these key skills in your resume:\n\n**{skills_str}**\n\nIs this correct? (yes/no)"
 
-    # Stage: Confirm extracted skills or enter manually
     if stage == "confirm_skills":
         if user_input.lower() in ["yes", "y"]:
             st.session_state.stage = "ask_questions"
@@ -226,7 +198,6 @@ def chat_logic(user_input):
         else:
             return "Please answer 'yes' or 'no'. Is the extracted skills list correct?"
 
-    # Stage: Manual skills input
     if stage == "manual_skills":
         skills = [s.strip() for s in user_input.split(",") if s.strip()]
         if not skills:
@@ -240,39 +211,32 @@ def chat_logic(user_input):
             return "⚠️ Sorry, I couldn't generate questions for your skills. Please try again later."
         return f"👍 Thanks! Let's start with question 1:\n\n{st.session_state.questions[0]}"
 
-    # Stage: Asking questions one by one
     if stage == "ask_questions":
-        # Save answer
         st.session_state.answers.append(user_input)
         st.session_state.current_question += 1
 
-        # If less than 5 questions, ask next
         if st.session_state.current_question < min(5, len(st.session_state.questions)):
             q = st.session_state.questions[st.session_state.current_question]
             return f"Question {st.session_state.current_question + 1}:\n\n{q}"
-
         else:
-            # After 5 questions, generate feedback and topics
             st.session_state.stage = "feedback"
             feedback = generate_feedback_and_topics(st.session_state.answers, st.session_state.skills)
             return f"📝 Here's your feedback and important topics to prepare:\n\n{feedback}\n\nThank you for participating!"
 
-    # Stage: Feedback done, end chat
     if stage == "feedback":
         st.session_state.end_chat = True
         return "✅ This concludes our interview simulation. Good luck!"
 
-    # Default fallback
     return "❓ Sorry, I didn't understand that. Please try again."
 
-# ----------------------------
-# UI Layout
-# ----------------------------
+# -----------------
+# Streamlit UI
+# -----------------
 
 st.markdown("## 🧠 TalentScout AI Assistant")
-st.caption("Upload your resume text below and get tailored technical questions and feedback.")
+st.caption("Paste your resume text below and get tailored technical interview questions and personalized feedback.")
 
-# Display conversation history
+# Display chat history
 with st.container():
     for i, msg in enumerate(st.session_state.messages):
         message(msg["content"], is_user=msg["role"] == "user", key=str(i))
@@ -283,11 +247,14 @@ if not st.session_state.end_chat:
     if user_prompt:
         st.session_state.messages.append({"role": "user", "content": user_prompt})
         bot_response = chat_logic(user_prompt)
-        time.sleep(0.2)
+        time.sleep(0.2)  # small delay for UX
         st.session_state.messages.append({"role": "assistant", "content": bot_response})
+
         st.experimental_rerun()
+
 else:
-    st.success("Conversation has ended. Refresh the page to restart.")
-    with st.expander("📄 Candidate Summary"):
-        for k, v in st.session_state.candidate_info.items():
-            st.markdown(f"**{k}:** {v}")
+    st.info("💡 The interview session has ended. Refresh the page to start a new session.")
+
+# Footer
+st.markdown("---")
+st.caption("© 2025 TalentScout AI | Powered by Groq LLaMA3 API")
