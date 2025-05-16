@@ -1,195 +1,147 @@
 import streamlit as st
-from streamlit_chat import message
-import re
-import io
+from PyPDF2 import PdfReader
 import docx2txt
-from datetime import datetime
-import pandas as pd
+import re
+import json
+
+# --- Your existing imports and Groq API setup ---
 
 # Initialize session state variables
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+if "all_responses" not in st.session_state:
+    st.session_state.all_responses = []
+
+if "topic_questions" not in st.session_state:
+    st.session_state.topic_questions = []
 
 if "candidate_info" not in st.session_state:
     st.session_state.candidate_info = {}
 
-if "resume_text" not in st.session_state:
-    st.session_state.resume_text = ""
+if "end_chat" not in st.session_state:
+    st.session_state.end_chat = False
 
-if "all_responses" not in st.session_state:
-    st.session_state.all_responses = []
-
-# -------- Resume text extraction helpers --------
-def extract_text_from_pdf(file) -> str:
-    import fitz  # PyMuPDF
-    doc = fitz.open(stream=file.read(), filetype="pdf")
-    text = ""
-    for page in doc:
-        text += page.get_text()
-    return text
-
-def extract_text_from_docx(file) -> str:
-    # docx2txt needs a file path or bytes
-    text = docx2txt.process(file)
-    return text
-
-def extract_text_from_txt(file) -> str:
-    return file.read().decode("utf-8")
-
-def extract_text_from_resume(uploaded_file) -> str:
-    filetype = uploaded_file.type
-    if "pdf" in filetype:
-        return extract_text_from_pdf(uploaded_file)
-    elif "word" in filetype or uploaded_file.name.endswith(".docx"):
-        return extract_text_from_docx(uploaded_file)
-    elif "text" in filetype or uploaded_file.name.endswith(".txt"):
-        return extract_text_from_txt(uploaded_file)
+# ----------------------------
+# Helper function: Extract text from uploaded resume
+# ----------------------------
+def extract_text_from_resume(uploaded_file):
+    if uploaded_file.type == "application/pdf":
+        pdf_reader = PdfReader(uploaded_file)
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() or ""
+        return text
+    elif uploaded_file.type == "text/plain":
+        return uploaded_file.getvalue().decode("utf-8")
+    elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        return docx2txt.process(uploaded_file)
     else:
         return ""
 
-# -------- Resume info extraction --------
-def extract_resume_details(text):
-    details = {}
+# ----------------------------
+# Helper function: Call your Groq LLM API for response
+# ----------------------------
+def generate_llm_response(prompt):
+    # Replace with your Groq API call, example:
+    # response = groq_llm_api_call(prompt)
+    # For demo, we return a mock JSON string:
+    mock_response = json.dumps({
+        "Full Name": "John Doe",
+        "Email": "john.doe@example.com",
+        "Phone Number": "+1-234-567-890",
+        "Years of Experience": "5",
+        "Position(s) applied for": "Software Engineer",
+        "Current Location": "San Francisco, CA",
+        "Tech Stack": "Python, Java, AWS"
+    })
+    return mock_response
 
-    # Extract email
-    emails = re.findall(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", text)
-    details["email"] = emails[0] if emails else ""
+# ----------------------------
+# Extract candidate info from resume text using LLM
+# ----------------------------
+def extract_candidate_info_from_text(resume_text):
+    prompt = f"""
+You are an AI assistant. Extract the following candidate details from the resume text below:
+- Full Name
+- Email
+- Phone Number
+- Years of Experience
+- Position(s) applied for
+- Current Location
+- Tech Stack
 
-    # Extract phone (simple pattern for international and local)
-    phones = re.findall(r"\+?\d[\d\s\-\(\)]{7,}\d", text)
-    details["phone"] = phones[0] if phones else ""
+If any info is not available, reply with 'Not mentioned'.
 
-    # Extract name (simple heuristic: first non-empty line with 2 words capitalized)
-    lines = text.splitlines()
-    name = ""
-    for line in lines:
-        if line.strip():
-            words = line.strip().split()
-            if 1 < len(words) < 5:
-                cap_words = sum(1 for w in words if w[0].isupper())
-                if cap_words >= 2:
-                    name = line.strip()
-                    break
-    details["name"] = name
+Resume Text:
+\"\"\"
+{resume_text}
+\"\"\"
 
-    # Extract skills (simple keyword matching for demo, ideally use a skill list)
-    skill_keywords = ["python", "java", "c++", "machine learning", "data analysis",
-                      "sql", "aws", "docker", "kubernetes", "spark", "hadoop", "react",
-                      "nodejs", "tensorflow", "pandas", "nlp"]
-    skills_found = []
-    text_lower = text.lower()
-    for skill in skill_keywords:
-        if skill in text_lower:
-            skills_found.append(skill)
-    details["skills"] = ", ".join(skills_found)
+Provide the info as a JSON object only.
+"""
+    response = generate_llm_response(prompt)
+    try:
+        candidate_info = json.loads(response)
+    except Exception:
+        candidate_info = {"Extracted Info": response}
+    return candidate_info
 
-    # Extract experience years (look for patterns like 'X years', 'X+ years')
-    exp = re.findall(r"(\d+)\s*\+?\s*years", text_lower)
-    experience_years = max([int(e) for e in exp]) if exp else ""
-    details["experience_years"] = experience_years
+# ----------------------------
+# Generate technical questions based on topic (demo)
+# ----------------------------
+def get_technical_questions(topic):
+    # Replace with your actual question generation logic or API call
+    return f"1. Explain the basics of {topic}.\n2. What are advanced concepts in {topic}?\n3. How do you apply {topic} in real projects?"
 
-    return details
-
-# -------- Chatbot logic --------
-def generate_interview_questions(topic):
-    # For demo, generate 15 basic questions on topic
-    base_questions = [
-        f"Explain the fundamental concepts of {topic}.",
-        f"What are the common challenges faced in {topic}?",
-        f"Describe a project where you applied {topic}.",
-        f"How do you stay updated with the latest trends in {topic}?",
-        f"What tools or frameworks do you use for {topic}?",
-        f"Explain a difficult problem you solved related to {topic}.",
-        f"How would you explain {topic} to a non-technical person?",
-        f"Compare {topic} with alternative approaches or technologies.",
-        f"Describe the most important skills for mastering {topic}.",
-        f"What are best practices when working with {topic}?",
-        f"How do you handle errors or exceptions in {topic}?",
-        f"Describe the future outlook or developments in {topic}.",
-        f"What books or courses do you recommend for learning {topic}?",
-        f"How have you applied {topic} in a team setting?",
-        f"Explain how you would optimize performance in {topic}."
-    ]
-    return "\n\n".join(base_questions)
-
+# ----------------------------
+# Chat logic after resume processing
+# ----------------------------
 def chat_logic(user_input):
-    user_input_lower = user_input.lower().strip()
+    if user_input.lower() in ["exit", "quit", "bye", "end"]:
+        st.session_state.end_chat = True
+        # You can add your data saving logic here if needed
+        return "✅ Thank you for chatting with TalentScout! We’ll be in touch shortly. Goodbye! 👋"
 
-    # If user requests question generation
-    if user_input_lower.startswith("generate questions on "):
-        topic = user_input[21:].strip()
-        if not topic:
-            return "❗ Please specify a topic after 'Generate questions on'."
-        questions = generate_interview_questions(topic)
-        return f"Here are 15 questions on *{topic}*:\n\n" + questions
+    if "generate questions on" in user_input.lower():
+        topic = user_input.lower().split("generate questions on")[-1].strip()
+        qns = get_technical_questions(topic)
+        st.session_state.topic_questions.append((topic, qns))
+        st.session_state.all_responses.append({"User Input": user_input, "AI Response": qns})
+        return f"Here are your questions on *{topic}*:\n\n{qns}"
 
-    # Otherwise fallback
-    return ("❓ Please ask me to 'Generate questions on <topic>' or type 'continue' to get more questions.")
+    return "🤖 You can ask me to generate technical questions by typing 'Generate questions on ...' or type 'end' to finish."
 
-# -------- Main UI --------
-st.set_page_config(page_title="TalentScout AI - Interview Q Generator", page_icon="🧠")
+# ----------------------------
+# Streamlit UI Layout
+# ----------------------------
 
-st.title("🧠 TalentScout AI - Interview Question Generator")
-st.markdown("Upload your resume, then generate tailored interview questions on any topic!")
+st.set_page_config(page_title="TalentScout AI Interviewer", page_icon="🤖")
 
-st.divider()
+st.title("🤖 TalentScout AI Interviewer")
 
-# Resume upload & extraction
-uploaded_file = st.file_uploader("Upload Resume (PDF, DOCX, TXT)", type=["pdf", "docx", "txt"])
-if uploaded_file:
-    text = extract_text_from_resume(uploaded_file)
-    st.session_state.resume_text = text
-    if text.strip():
-        st.success("✅ Resume text extracted successfully!")
-        extracted_info = extract_resume_details(text)
-        st.session_state.candidate_info.update(extracted_info)
+with st.sidebar:
+    st.header("Upload Resume")
+    uploaded_file = st.file_uploader("📄 Upload Resume (PDF, DOCX, TXT)", type=["pdf", "txt", "docx"])
+    if uploaded_file:
+        with st.spinner("Extracting text and info from resume..."):
+            resume_text = extract_text_from_resume(uploaded_file)
+            candidate_info = extract_candidate_info_from_text(resume_text)
+            st.session_state.candidate_info = candidate_info
+            st.session_state.candidate_info["Resume Excerpt"] = resume_text[:300] + "..."
+            # For demo, add some questions from resume content
+            topic_q = get_technical_questions("Resume Content")
+            st.session_state.topic_questions.append(("Resume Content", topic_q))
+            st.session_state.all_responses.append({"Resume Extract": resume_text[:300], "Questions": topic_q})
+        st.success("✅ Resume processed and candidate info extracted.")
 
-        st.markdown("### Extracted Resume Details:")
-        st.write(f"**Name:** {extracted_info.get('name', '')}")
-        st.write(f"**Email:** {extracted_info.get('email', '')}")
-        st.write(f"**Phone:** {extracted_info.get('phone', '')}")
-        st.write(f"**Skills:** {extracted_info.get('skills', '')}")
-        st.write(f"**Experience (years):** {extracted_info.get('experience_years', '')}")
-    else:
-        st.error("❌ Could not extract text from this file.")
+if st.session_state.candidate_info:
+    with st.sidebar.expander("👤 Extracted Candidate Info", expanded=True):
+        for k, v in st.session_state.candidate_info.items():
+            st.markdown(f"{k}:** {v}")
 
-st.divider()
+if not st.session_state.end_chat:
+    user_input = st.text_input("💬 Enter your message or 'Generate questions on <topic>'", key="input")
+    if user_input:
+        response = chat_logic(user_input)
+        st.markdown(f"*TalentScout:* {response}")
 
-# Optional candidate info editing
-with st.expander("Optional: Edit candidate info or add more details"):
-    st.session_state.candidate_info["name"] = st.text_input("Name", st.session_state.candidate_info.get("name", ""))
-    st.session_state.candidate_info["email"] = st.text_input("Email", st.session_state.candidate_info.get("email", ""))
-    st.session_state.candidate_info["phone"] = st.text_input("Phone", st.session_state.candidate_info.get("phone", ""))
-    st.session_state.candidate_info["experience"] = st.selectbox("Years of Experience", ["", "0-1", "1-3", "3-5", "5+"],
-                                                                   index=["", "0-1", "1-3", "3-5", "5+"].index(st.session_state.candidate_info.get("experience", "")) if st.session_state.candidate_info.get("experience", "") in ["", "0-1", "1-3", "3-5", "5+"] else 0)
-    st.session_state.candidate_info["expected_salary"] = st.text_input("Expected Salary", st.session_state.candidate_info.get("expected_salary", ""))
-    st.session_state.candidate_info["graduation_year"] = st.text_input("Graduation Year", st.session_state.candidate_info.get("graduation_year", ""))
-    st.session_state.candidate_info["graduation_stream"] = st.text_input("Graduation Stream", st.session_state.candidate_info.get("graduation_stream", ""))
-
-st.divider()
-
-# Chat container
-chat_container = st.container()
-
-# User input form
-with st.form("chat_input_form", clear_on_submit=True):
-    user_input = st.text_input("You:", placeholder="Ask me to generate questions on a topic or type 'continue'")
-    submitted = st.form_submit_button("Send")
-
-if submitted and user_input:
-    response = chat_logic(user_input)
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    st.session_state.messages.append({"role": "assistant", "content": response})
-
-with chat_container:
-    for i, chat in enumerate(st.session_state.messages):
-        is_user = chat["role"] == "user"
-        message(chat["content"], is_user=is_user, key=f"msg_{i}")
-
-# Initial greeting
-if len(st.session_state.messages) == 0:
-    greeting = ("Hello! 👋 To get started, please type:\n\n"
-                "**Generate questions on <topic>**\n\n"
-                "Example: Generate questions on Python programming")
-    st.session_state.messages.append({"role": "assistant", "content": greeting})
-    st.experimental_rerun()
+else:
+    st.info("Chat session ended. Please refresh to start a new session.")
